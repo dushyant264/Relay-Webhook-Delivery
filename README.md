@@ -62,13 +62,3 @@ A few of the design problems this project deals with:
   a circuit breaker keep a dead or slow endpoint from eating the worker pool.
 - **Every attempt is recorded** — status code, error, latency — so "where is my
   webhook?" is a query, not an investigation.
-
-## Docs
-
-Everything lives in [docs/](docs/):
-
-- [PROJECT-GUIDE.md](docs/PROJECT-GUIDE.md) — the full reference: all services, APIs, design highlights
-- [GETTING-STARTED.md](docs/GETTING-STARTED.md) — clone to first webhook, step by step
-- [architecture/](docs/architecture/) — HLD diagrams (SVG) + a deep-dive doc per component
-- [DEPLOYMENT.md](docs/DEPLOYMENT.md) — how to put it on the public internet
-- [INTERVIEW-QUESTIONS.txt](docs/INTERVIEW-QUESTIONS.txt) — 65 questions this project should prepare you to answer
