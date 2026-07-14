@@ -45,9 +45,6 @@ climb the backoff ladder in real time:
 ./scripts/demo.ps1
 ```
 
-Step-by-step instructions (including every credential and where it comes from)
-are in [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md).
-
 ## What's interesting about it
 
 A few of the design problems this project deals with:
