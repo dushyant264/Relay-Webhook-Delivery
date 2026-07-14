@@ -1,0 +1,25 @@
+{
+  "name": "relay-control-plane",
+  "version": "1.0.0",
+  "description": "Relay control plane: tenant/application/endpoint management and delivery logs",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.0",
+    "fastify": "^5.0.0",
+    "pg": "^8.12.0",
+    "prom-client": "^15.1.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "@types/pg": "^8.11.6",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

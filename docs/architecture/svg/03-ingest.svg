@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="380" viewBox="0 0 1000 380" font-family="system-ui, 'Segoe UI', sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#52514e"/></marker>
+  </defs>
+  <rect width="1000" height="380" fill="#fcfcfb"/>
+  <text x="30" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Ingest (Go) — request lifecycle</text>
+
+  <rect x="30" y="120" width="120" height="52" rx="8" fill="#fcfcfb" stroke="#52514e"/>
+  <text x="90" y="142" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="middle">Producer</text>
+  <text x="90" y="158" font-size="11" fill="#52514e" text-anchor="middle">Bearer API key</text>
+
+  <!-- pipeline container -->
+  <rect x="190" y="80" width="600" height="130" rx="10" fill="#e3edfb" stroke="#2a78d6"/>
+  <text x="490" y="102" font-size="12.5" font-weight="600" fill="#1c5cab" text-anchor="middle">Ingest service · POST /v1/events</text>
+
+  <g font-size="12" fill="#0b0b0b" text-anchor="middle">
+    <rect x="210" y="118" width="125" height="70" rx="7" fill="#fcfcfb" stroke="#2a78d6"/>
+    <text x="272" y="141" font-weight="600">1 · Authenticate</text>
+    <text x="272" y="157" font-size="10.5" fill="#52514e">prefix lookup, cached</text>
+    <text x="272" y="171" font-size="10.5" fill="#52514e">constant-time hash cmp</text>
+
+    <rect x="355" y="118" width="125" height="70" rx="7" fill="#fcfcfb" stroke="#2a78d6"/>
+    <text x="417" y="141" font-weight="600">2 · Validate</text>
+    <text x="417" y="157" font-size="10.5" fill="#52514e">JSON ≤ 1 MiB</text>
+    <text x="417" y="171" font-size="10.5" fill="#52514e">event type registered?</text>
+
+    <rect x="500" y="118" width="125" height="70" rx="7" fill="#fcfcfb" stroke="#2a78d6"/>
+    <text x="562" y="141" font-weight="600">3 · Persist</text>
+    <text x="562" y="157" font-size="10.5" fill="#52514e">idempotent insert on</text>
+    <text x="562" y="171" font-size="10.5" fill="#52514e">Idempotency-Key</text>
+
+    <rect x="645" y="118" width="125" height="70" rx="7" fill="#fcfcfb" stroke="#2a78d6"/>
+    <text x="707" y="141" font-weight="600">4 · Publish</text>
+    <text x="707" y="157" font-size="10.5" fill="#52514e">EventMsg{event_id}</text>
+    <text x="707" y="171" font-size="10.5" fill="#52514e">waits broker confirm</text>
+  </g>
+  <line x1="150" y1="146" x2="206" y2="146" stroke="#52514e" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="335" y1="153" x2="351" y2="153" stroke="#52514e" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="480" y1="153" x2="496" y2="153" stroke="#52514e" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="625" y1="153" x2="641" y2="153" stroke="#52514e" stroke-width="1.6" marker-end="url(#ar)"/>
+
+  <!-- 202 back -->
+  <path d="M190 190 C 160 190, 130 186, 110 176" fill="none" stroke="#0ca30c" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="152" y="210" font-size="11" fill="#006300" text-anchor="middle">202 {event_id}</text>
+
+  <!-- dependencies -->
+  <rect x="240" y="280" width="150" height="52" rx="8" fill="#f0efec" stroke="#898781"/>
+  <text x="315" y="302" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="middle">Redis</text>
+  <text x="315" y="318" font-size="11" fill="#52514e" text-anchor="middle">API-key cache · 60s TTL</text>
+
+  <rect x="450" y="280" width="170" height="52" rx="8" fill="#f0efec" stroke="#898781"/>
+  <text x="535" y="302" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="middle">Postgres</text>
+  <text x="535" y="318" font-size="11" fill="#52514e" text-anchor="middle">api_keys · event_types · events</text>
+
+  <rect x="680" y="280" width="170" height="52" rx="8" fill="#fdf3d7" stroke="#c98500"/>
+  <text x="765" y="302" font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="middle">RabbitMQ</text>
+  <text x="765" y="318" font-size="11" fill="#52514e" text-anchor="middle">relay.events (confirmed)</text>
+
+  <line x1="285" y1="188" x2="308" y2="276" stroke="#898781" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+  <line x1="470" y1="188" x2="522" y2="276" stroke="#52514e" stroke-width="1.6" marker-end="url(#ar)"/>
+  <line x1="710" y1="188" x2="758" y2="276" stroke="#52514e" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="880" y="248" font-size="11" fill="#52514e" text-anchor="middle">crash-only: broker loss</text>
+  <text x="880" y="263" font-size="11" fill="#52514e" text-anchor="middle">→ exit → restart</text>
+</svg>

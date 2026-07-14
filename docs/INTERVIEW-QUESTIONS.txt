@@ -1,0 +1,327 @@
+RELAY — INTERVIEW QUESTION BANK (65 questions with answer cues)
+================================================================
+How to use: cover the cue line, answer out loud, then check yourself.
+The cues are starting points — the deep answers live in docs/architecture/.
+
+----------------------------------------------------------------
+A. PROJECT DEFINITION & PITCH
+----------------------------------------------------------------
+1. What does Relay do, in one sentence?
+   Cue: webhook infrastructure as a service — producers send an event once,
+   Relay guarantees signed, at-least-once delivery to every subscribed
+   endpoint with retries, rate limiting, circuit breaking and an audit trail.
+
+2. What problem does it solve? Who has this problem?
+   Cue: every company that sends webhooks (payments, CI, SaaS events)
+   rebuilds the same hard parts: retries, signing, dead-lettering, audit.
+   Relay centralizes that (same category as Svix / Stripe's webhook infra).
+
+3. Why is plain pub/sub not enough? Why build all this around a queue?
+   Cue: pub/sub is fire-and-forget — no per-attempt audit trail, no backoff
+   policy, no per-subscriber isolation, no signing, no replay story.
+
+4. Walk me through the life of one event, end to end.
+   Cue: auth -> validate -> idempotent insert -> confirmed publish -> fan-out
+   (1 event -> N delivery rows + messages) -> per-delivery: breaker/rate
+   checks -> HMAC sign -> POST -> record attempt -> retry ladder or DLQ.
+
+5. What is explicitly OUT of scope and why?
+   Cue: exactly-once (impossible over HTTP), ordering guarantees (head-of-line
+   blocking), K8s (compose is enough for v1), polished frontend.
+
+6. If you had one more month, what would you build next?
+   Cue: replay-from-DLQ API, per-tenant quotas, endpoint auto-disable policy,
+   OpenAPI spec, k6 load-test numbers, Kafka comparison benchmark.
+
+----------------------------------------------------------------
+B. ARCHITECTURE & KEY DECISIONS
+----------------------------------------------------------------
+7. Why three services instead of a monolith?
+   Cue: independent scaling (delivery is the bottleneck), failure isolation
+   (control plane down != webhooks down), hot path vs management surface.
+
+8. Why is fan-out a separate stage from ingest?
+   Cue: keeps producer-facing latency constant (1 publish regardless of N
+   subscribers), fan-out scales horizontally, retries of fan-out are safe.
+
+9. Why do the Go services and the control plane never talk to each other?
+   Cue: coordination through Postgres (+ short Redis cache). No RPC = planes
+   deploy and fail independently; config changes are just rows.
+
+10. Why Go for ingest/dispatch and TypeScript for the control plane?
+    Cue: Go — cheap concurrency for thousands of in-flight HTTP deliveries,
+    single static binary. TS — CRUD/product surface, fast iteration, zod
+    validation. Polyglot where each is strongest, both are typed.
+
+11. Messages carry only IDs, not payloads. Why?
+    Cue: Postgres is the system of record; queue wipe loses schedule state
+    not data; small messages; consumers re-read fresh state (e.g. disabled).
+    Trade-off: extra DB read per hop.
+
+12. What is "crash-only" design and where do you use it?
+    Cue: on AMQP connection loss the service exits; orchestrator restarts it.
+    All state is external (PG/MQ/Redis), so recovery = restart. Simpler and
+    more honest than in-process reconnect state machines.
+
+13. Where are the single points of failure?
+    Cue: Postgres and RabbitMQ are hard deps (HA story: replicas/quorum
+    queues in v2). Redis is soft — fails open, protection degrades only.
+
+14. How would this design change at 100x the load?
+    Cue: partition deliveries queue (per-tenant or hash), more dispatch
+    replicas, PG read replicas + partitioned attempts table, batch inserts,
+    payload offload to object storage over a size threshold.
+
+----------------------------------------------------------------
+C. RABBITMQ & MESSAGING
+----------------------------------------------------------------
+15. Why RabbitMQ and not Kafka?
+    Cue: this is a work-queue problem (compete-for-jobs, per-message ack,
+    per-message retry routing), not a stream/replay problem. Kafka partitions
+    give ordering we don't want (head-of-line blocking on a failing endpoint)
+    and no native per-message DLQ/delay. Kafka would fit event HISTORY.
+
+16. Why not Redis pub/sub or Redis streams as the queue?
+    Cue: Redis pub/sub has no persistence/ack; streams have no DLX/TTL
+    routing; RabbitMQ gives confirms, durability, DLX natively.
+
+17. Why not a cloud queue (SQS/Pub-Sub)?
+    Cue: valid choice; RabbitMQ chosen to own the broker semantics
+    (exchanges, DLX, TTL) and stay portable/self-hostable. SQS delay caps at
+    15 min, and I wanted to design the backoff mechanics myself.
+
+18. Explain your exchange/queue topology.
+    Cue: relay.events -> event-fanout q; relay.deliveries -> deliveries q;
+    relay.retry -> 5 TTL tier queues dead-lettering back to deliveries;
+    relay.dlx -> dlq. All durable, declared idempotently by every service.
+
+19. How do delayed retries work on stock RabbitMQ? Why not per-message TTL?
+    Cue: per-QUEUE TTL ladder + DLX. RabbitMQ only expires the head of a
+    queue, so mixed per-message TTLs cause head-of-line blocking — a 2h
+    message parked in front of a 10s one blocks it.
+
+20. Why not the rabbitmq-delayed-message-exchange plugin?
+    Cue: works, but it's a plugin (ops surface, historically weak HA); the
+    ladder is stock-broker, transparent in the management UI, and doubles as
+    a parking lot for rate-limited/breaker-open messages.
+
+21. What are publisher confirms and why do you wait for them?
+    Cue: broker ack that it owns the message. Ingest returns 202 only after
+    confirm -> "accepted" actually means durable handoff.
+
+22. Why manual acks? What happens to unacked messages on worker crash?
+    Cue: redelivered to another consumer — that's the at-least-once
+    mechanism; idempotency layers absorb the replay.
+
+23. What is prefetch (QoS) and why 16?
+    Cue: max unacked messages per consumer; bounds memory, spreads work
+    across replicas; too high = hoarding, too low = round-trip latency bound.
+
+24. How do you handle poison messages?
+    Cue: unparseable JSON is logged and ACKED (never requeued) — a parse
+    error can't succeed on retry; requeueing hot-loops the queue.
+
+25. What happens if RabbitMQ goes down entirely?
+    Cue: ingest returns 5xx (producers retry with same idempotency key);
+    durable queues survive restart; services crash-restart and reconnect.
+
+26. Scale delivery consumers to 50 instances — what breaks?
+    Cue: nothing by design: queue round-robins, DB constraints dedup, rate
+    limiter is shared in Redis. Watch PG connection count (pool per pod).
+
+----------------------------------------------------------------
+D. DELIVERY GUARANTEES & IDEMPOTENCY
+----------------------------------------------------------------
+27. What delivery guarantee do you provide and why not exactly-once?
+    Cue: at-least-once. Exactly-once over HTTP is impossible (ack can be
+    lost after the subscriber processed it). Make duplicates SAFE instead:
+    subscribers dedup on Relay-Id.
+
+28. Name every place a duplicate can occur and the layer that absorbs it.
+    Cue: producer retry -> events unique (app, idempotency_key);
+    event msg redelivery -> deliveries unique (event_id, endpoint_id);
+    delivery msg redelivery -> attempts unique (delivery_id, attempt_no)
+    + finished-status short-circuit.
+
+29. Ingest crashes between DB insert and publish. What happens?
+    Cue: producer gets 5xx/timeout, retries same Idempotency-Key, gets the
+    stored event id back... but note: the original event row exists and was
+    never published — the duplicate response path doesn't re-publish. This
+    is the known at-least-once gap; fix = transactional outbox (v2 answer).
+
+30. What is the transactional outbox pattern and why didn't you use it?
+    Cue: write event + "to publish" row in one tx; a relay process publishes
+    and marks done. Chose insert-then-confirmed-publish + client retry for
+    v1 simplicity; outbox is the correct hardening and I can explain it.
+
+31. Why is ordering not guaranteed? What if a customer needs it?
+    Cue: retries make strict order impossible without head-of-line blocking.
+    Envelope carries timestamp; per-entity ordering could be added via
+    partitioned queues keyed on entity id (accepting HoL within a key).
+
+32. Why does the retry message carry the attempt number?
+    Cue: makes each attempt a uniquely identifiable unit of work ->
+    idempotent attempt recording under redelivery.
+
+33. Why cap at 6 attempts / ~2h45m total? Why exponential backoff at all?
+    Cue: most outages are short (fast early retries); exponential spacing
+    avoids hammering a struggling endpoint (retry storms); after hours the
+    endpoint is effectively down -> DLQ + human/automated follow-up.
+
+34. What happens to a message in the DLQ? (the honest answer)
+    Cue: v1 surfaces it (queue + status dead + dashboard). Replay endpoint
+    is the natural v2: re-publish with attempt reset after operator fix.
+
+----------------------------------------------------------------
+E. DATA MODEL & POSTGRES
+----------------------------------------------------------------
+35. Why Postgres as the system of record and not Mongo/DynamoDB?
+    Cue: the idempotency design IS relational constraints (partial unique
+    indexes, ON CONFLICT) + transactions + jsonb gives the flexible part.
+
+36. Explain events vs deliveries vs delivery_attempts.
+    Cue: fact (what happened) vs intent per endpoint (what we owe) vs audit
+    (what we did). 1 event -> N deliveries -> M attempts each.
+
+37. How does ON CONFLICT DO NOTHING ... RETURNING make fan-out idempotent?
+    Cue: returns only NEWLY inserted rows -> replayed fan-out publishes zero
+    new delivery messages.
+
+38. delivery_attempts grows forever. What's your plan?
+    Cue: partition by month + retention policy (drop old partitions),
+    or archive to object storage; index (delivery_id, attempt_no) keeps
+    reads sane meanwhile.
+
+39. Why a partial unique index on idempotency keys?
+    Cue: uniqueness only when key provided; NULLs don't collide -> key stays
+    optional for producers.
+
+40. Why status + attempt_count denormalized on deliveries?
+    Cue: the feed/dashboard reads would otherwise aggregate attempts every
+    time; updated transactionally with the attempt insert so it can't drift.
+
+41. Migrations are just init SQL — what would production need?
+    Cue: versioned migration tool (goose/atlas/flyway), backward-compatible
+    steps, no auto-seed.
+
+----------------------------------------------------------------
+F. REDIS: RATE LIMITING & CIRCUIT BREAKER
+----------------------------------------------------------------
+42. Why does the delivery worker need a rate limiter at all?
+    Cue: protect subscribers from bursts, and protect the fleet from one
+    slow endpoint monopolizing workers (noisy neighbor / tenant isolation).
+
+43. How is it implemented? Limits of that approach?
+    Cue: fixed 1-second window INCR+EXPIRE per endpoint. Boundary burst
+    (2x at window edges) is the known flaw; upgrade path = token bucket in a
+    Lua script (atomic, allows smooth bursts).
+
+44. Rate-limited deliveries are parked, not dropped, and consume no attempt. Why?
+    Cue: being over budget is OUR throttling decision, not endpoint failure;
+    punishing the retry budget for it would be wrong.
+
+45. Walk through your circuit breaker states.
+    Cue: closed -> (5 consecutive failures) open for 2 min (Redis key TTL =
+    half-open timer) -> TTL expiry lets traffic through -> one success resets.
+    While open: no HTTP call, park in 1m tier, no attempt consumed.
+
+46. Why a circuit breaker when you already have retries?
+    Cue: retries fix ONE delivery; the breaker protects the WORKER POOL from
+    burning slots on a dead endpoint (10s timeout x thousands of messages).
+
+47. Redis dies. What happens?
+    Cue: fail open — limiter allows, breaker reads closed, key cache misses
+    to PG. Protection degrades; correctness never depends on Redis.
+
+48. Why is the breaker in Redis and not in process memory?
+    Cue: N dispatch replicas must share the endpoint's health view, or each
+    replica independently re-discovers the failure (threshold x N calls).
+
+----------------------------------------------------------------
+G. SECURITY
+----------------------------------------------------------------
+49. How do subscribers know a webhook is really from Relay?
+    Cue: Relay-Signature: v1=HMAC-SHA256(endpoint_secret, "id.ts.body") +
+    Relay-Timestamp. Shared secret per endpoint, shown once at creation.
+
+50. Why sign "id.timestamp.body" instead of just the body?
+    Cue: binding the timestamp defeats replay (receiver enforces freshness
+    window); binding the id ties the signature to one specific delivery.
+
+51. How are API keys stored and verified? Why a prefix column?
+    Cue: sha256 at rest, raw shown once; unique prefix = indexed lookup
+    without knowing the key; constant-time hash comparison vs timing attacks.
+
+52. Why is sha256 acceptable for API keys when passwords need bcrypt?
+    Cue: keys are high-entropy random strings — brute force is infeasible;
+    bcrypt exists to slow guessing of LOW-entropy human passwords.
+
+53. Key revocation: how fast does it take effect and why?
+    Cue: revoked_at set immediately; ingest's Redis cache means up to 60s
+    staleness — deliberate freshness/latency trade-off, and I can name it.
+
+54. What's the weakest security point right now?
+    Cue: single static ADMIN_TOKEN on the control plane (demo-grade, called
+    out in docs); v2 = real IAM/JWT/SSO at the auth hook seam. Also SSRF:
+    endpoint URLs should be validated against private IP ranges in prod.
+
+55. A tenant's endpoint secret leaks. Blast radius and recovery?
+    Cue: forgeable webhooks for THAT endpoint only; rotate = create new
+    secret/endpoint; v2 = dual-secret rotation window like Stripe.
+
+----------------------------------------------------------------
+H. GO & TYPESCRIPT SPECIFICS
+----------------------------------------------------------------
+56. Where does Go concurrency actually appear in this project?
+    Cue: two consumer loop goroutines per dispatch instance, HTTP server +
+    signal handling + connection-loss watchdog goroutines; per-delivery work
+    is bounded by prefetch, not unbounded goroutine spawn.
+
+57. Why the stdlib HTTP mux instead of gin/echo? Why pgx over an ORM?
+    Cue: Go 1.22+ mux has method+path routing — three routes don't justify a
+    framework. pgx: the SQL (ON CONFLICT ... RETURNING) is the design; an
+    ORM would hide the most interesting part.
+
+58. How does graceful shutdown work in the Go services?
+    Cue: SIGTERM -> stop accepting/consuming, ctx cancel, in-flight work
+    finishes or times out; unacked messages redeliver elsewhere (safe by
+    idempotency).
+
+59. Why Fastify over Express/Nest? Why zod?
+    Cue: Fastify — typed, fast, structured logging built in, less magic than
+    Nest for an API this size. zod — runtime validation TS types can't do,
+    parse-don't-validate at the boundary.
+
+60. The dashboard is a single static HTML file. Defend that.
+    Cue: read-only views, no build chain to maintain, served by the existing
+    service; React is the v2 seam when interactivity grows. Right-sizing is
+    a feature, not laziness.
+
+----------------------------------------------------------------
+I. OBSERVABILITY & OPERATIONS
+----------------------------------------------------------------
+61. What metrics would you alert on in production, with thresholds?
+    Cue: DLQ rate > 0 sustained, delivery success ratio drop, queue depth
+    growth rate (consumers behind), p99 relay_delivery_duration, breaker
+    opens per minute, ingest 5xx ratio.
+
+62. How would you debug "my webhooks aren't arriving" for one customer?
+    Cue: audit trail first: GET deliveries by endpoint -> attempts show
+    status codes/errors/latency -> breaker state / disabled flag -> receiver
+    side signature verification -> RabbitMQ UI queue depths.
+
+63. How do you deploy this publicly and what changes from local?
+    Cue: (docs/DEPLOYMENT.md) VPS + compose + Caddy HTTPS; rotate all demo
+    creds, remove seed, never expose broker/db ports; or free managed tiers
+    (Neon/CloudAMQP/Upstash) with env swaps.
+
+64. What load numbers can you claim, and how would you get honest ones?
+    Cue: don't claim unmeasured numbers. Plan: k6 on ingest + a no-op
+    receiver, measure accepted events/sec and delivery p99 vs dispatch
+    replica count; publish methodology with results.
+
+65. An interviewer says: "This is over-engineered for a demo." Response?
+    Cue: the complexity IS the product domain (each mechanism maps to a real
+    failure mode I can name), and where I right-sized I can point at it:
+    no K8s, no ORM, no SPA framework, single-file dashboard, demo-grade auth
+    explicitly labeled with its v2 seam.

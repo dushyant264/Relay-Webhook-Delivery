@@ -1,0 +1,122 @@
+name: relay
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # management UI (relay/relay)
+      - "15692:15692"  # prometheus metrics
+    environment:
+      RABBITMQ_DEFAULT_USER: relay
+      RABBITMQ_DEFAULT_PASS: relay
+    volumes:
+      - ./deploy/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: relay
+    volumes:
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  ingest:
+    build:
+      context: ./go
+      target: ingest
+    ports:
+      - "8081:8081"
+    environment: &go-env
+      DATABASE_URL: postgres://relay:relay@postgres:5432/relay
+      AMQP_URL: amqp://relay:relay@rabbitmq:5672/
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  dispatch:
+    build:
+      context: ./go
+      target: dispatch
+    ports:
+      - "8082:8082" # health + metrics only
+    environment: *go-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  control-plane:
+    build:
+      context: ./control-plane
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://relay:relay@postgres:5432/relay
+      ADMIN_TOKEN: dev-admin-token # demo-grade auth; replace outside local dev
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
+  receiver:
+    build:
+      context: ./go
+      target: receiver
+    ports:
+      - "8090:8090"
+    environment:
+      # must match the demo endpoint secret seeded in 002_seed_demo.sql
+      RECEIVER_SECRET: whsec_demo_5f4dcc3b5aa765d61d83
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: relay
+      GF_SECURITY_ADMIN_PASSWORD: relay
+    volumes:
+      - ./deploy/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+
+volumes:
+  rabbitmq-data:
+  postgres-data:

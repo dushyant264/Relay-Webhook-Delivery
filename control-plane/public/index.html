@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay — Webhook Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb;
+    --ink: #0b0b0b; --ink-2: #52514e; --ink-muted: #898781;
+    --hairline: #e1e0d9; --border: rgba(11,11,11,0.10);
+    --good: #0ca30c; --serious: #ec835a; --critical: #d03b3b; --neutral: #898781;
+    --accent: #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19;
+      --ink: #ffffff; --ink-2: #c3c2b7; --ink-muted: #898781;
+      --hairline: #2c2c2a; --border: rgba(255,255,255,0.10);
+      --accent: #3987e5;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 24px; max-width: 1100px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  header h1 { font-size: 20px; letter-spacing: -0.01em; }
+  header .sub { color: var(--ink-2); }
+  #tokenbar { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  #tokenbar input {
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; width: 200px; font: inherit;
+  }
+  #tokenbar button, .linkish {
+    background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer;
+  }
+  #tokenbar button:hover { border-color: var(--ink-muted); }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { color: var(--ink-2); font-size: 12px; margin-bottom: 4px; }
+  .tile .value { font-size: 30px; font-weight: 650; letter-spacing: -0.02em; }
+  .tile .hint { color: var(--ink-muted); font-size: 12px; }
+
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+  section h2 { font-size: 14px; color: var(--ink-2); font-weight: 600; margin-bottom: 10px; }
+  .overflow { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th { text-align: left; color: var(--ink-muted); font-weight: 500; font-size: 12px; padding: 6px 10px; border-bottom: 1px solid var(--hairline); }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  tr.delivery { cursor: pointer; }
+  tr.delivery:hover td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  .muted { color: var(--ink-muted); }
+  .url { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .badge .sym { font-size: 11px; line-height: 1; }
+
+  .attempts td { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+  .attempts table { margin: 4px 0; }
+  .attempts th, .attempts td { border-bottom: none; padding: 3px 10px; font-size: 12.5px; }
+
+  .pill { border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: 11.5px; color: var(--ink-2); margin-right: 4px; white-space: nowrap; }
+  #error { color: var(--critical); margin-bottom: 12px; display: none; }
+  footer { color: var(--ink-muted); font-size: 12px; text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Relay</h1>
+  <span class="sub">webhook delivery dashboard</span>
+  <div id="tokenbar">
+    <input id="token" type="password" placeholder="admin token" autocomplete="off">
+    <button id="save">Connect</button>
+  </div>
+</header>
+
+<div id="error"></div>
+
+<div class="tiles">
+  <div class="tile"><div class="label">Events · 24h</div><div class="value" id="t-events">–</div></div>
+  <div class="tile"><div class="label">Delivered · 24h</div><div class="value" id="t-succeeded">–</div><div class="hint" id="t-rate"></div></div>
+  <div class="tile"><div class="label">Retrying</div><div class="value" id="t-failed">–</div><div class="hint">failed, in backoff</div></div>
+  <div class="tile"><div class="label">Dead-lettered · 24h</div><div class="value" id="t-dead">–</div></div>
+  <div class="tile"><div class="label">Active endpoints</div><div class="value" id="t-endpoints">–</div></div>
+</div>
+
+<section>
+  <h2>Recent deliveries <span class="muted">(click a row for the attempt-by-attempt audit trail)</span></h2>
+  <div class="overflow"><table>
+    <thead><tr><th>Time</th><th>Event</th><th>Endpoint</th><th>Status</th><th class="num">Attempts</th></tr></thead>
+    <tbody id="deliveries"></tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>Endpoints</h2>
+  <div class="overflow"><table>
+    <thead><tr><th>Application</th><th>URL</th><th>Subscriptions</th><th class="num">Rate/s</th><th>State</th></tr></thead>
+    <tbody id="endpoints"></tbody>
+  </table></div>
+</section>
+
+<footer>auto-refreshes every 5s · API docs in <span class="mono">docs/architecture/05-control-plane.md</span></footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let token = localStorage.getItem("relay_admin_token") || "";
+$("token").value = token;
+const expanded = new Set();
+
+// Status → color + symbol. Color never carries meaning alone: each badge
+// pairs a symbol and the status word with the dot.
+const STATUS = {
+  succeeded: { color: "var(--good)",     sym: "✓", label: "succeeded" },
+  pending:   { color: "var(--neutral)",  sym: "…", label: "pending" },
+  failed:    { color: "var(--serious)",  sym: "↻", label: "retrying" },
+  dead:      { color: "var(--critical)", sym: "✕", label: "dead" },
+};
+const badge = (s) => {
+  const st = STATUS[s] ?? STATUS.pending;
+  return `<span class="badge"><span class="dot" style="background:${st.color}"></span><span class="sym" style="color:${st.color}">${st.sym}</span>${st.label}</span>`;
+};
+
+async function api(path) {
+  const res = await fetch(path, { headers: { Authorization: "Bearer " + token } });
+  if (!res.ok) throw new Error(res.status === 401 ? "Invalid admin token — enter it top-right (local default: dev-admin-token)" : `API error ${res.status}`);
+  return res.json();
+}
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+async function refresh() {
+  try {
+    const [o, dels, apps] = await Promise.all([
+      api("/v1/overview"),
+      api("/v1/deliveries?limit=25"),
+      api("/v1/applications"),
+    ]);
+    $("error").style.display = "none";
+
+    $("t-events").textContent = o.events_24h;
+    $("t-succeeded").textContent = o.deliveries.succeeded;
+    $("t-failed").textContent = o.deliveries.failed + o.deliveries.pending;
+    $("t-dead").textContent = o.deliveries.dead;
+    $("t-endpoints").textContent = o.endpoints;
+    const done = o.deliveries.succeeded + o.deliveries.dead;
+    $("t-rate").textContent = done ? Math.round((100 * o.deliveries.succeeded) / done) + "% success of finished" : "";
+
+    $("deliveries").innerHTML = dels.map((d) => `
+      <tr class="delivery" data-id="${d.id}">
+        <td class="mono muted">${fmtTime(d.created_at)}</td>
+        <td>${esc(d.event_type)}</td>
+        <td class="mono url" title="${esc(d.url)}">${esc(d.url)}</td>
+        <td>${badge(d.status)}</td>
+        <td class="num">${d.attempt_count}</td>
+      </tr>
+      <tr class="attempts" data-for="${d.id}" style="display:none"><td colspan="5">loading…</td></tr>
+    `).join("") || `<tr><td colspan="5" class="muted">No deliveries yet — send an event to the ingest API.</td></tr>`;
+    for (const id of expanded) toggleAttempts(id, true);
+
+    const endpointRows = [];
+    for (const a of apps) {
+      const eps = await api(`/v1/applications/${a.id}/endpoints`);
+      for (const e of eps) {
+        endpointRows.push(`
+          <tr>
+            <td>${esc(a.tenant_name)} / ${esc(a.name)}</td>
+            <td class="mono url" title="${esc(e.url)}">${esc(e.url)}</td>
+            <td>${e.event_types.map((t) => `<span class="pill">${esc(t)}</span>`).join("")}</td>
+            <td class="num">${e.rate_limit_per_sec}</td>
+            <td>${e.disabled ? badge("dead").replace("dead", "disabled") : badge("succeeded").replace("succeeded", "active")}</td>
+          </tr>`);
+      }
+    }
+    $("endpoints").innerHTML = endpointRows.join("") || `<tr><td colspan="5" class="muted">No endpoints configured.</td></tr>`;
+  } catch (err) {
+    $("error").textContent = err.message;
+    $("error").style.display = "block";
+  }
+}
+
+async function toggleAttempts(id, forceOpen = false) {
+  const row = document.querySelector(`tr.attempts[data-for="${id}"]`);
+  if (!row) return;
+  const open = row.style.display !== "none";
+  if (open && !forceOpen) { row.style.display = "none"; expanded.delete(id); return; }
+  expanded.add(id);
+  row.style.display = "";
+  try {
+    const d = await api(`/v1/deliveries/${id}`);
+    row.firstElementChild.innerHTML = d.attempts.length ? `
+      <table>
+        <thead><tr><th>#</th><th>Result</th><th class="num">HTTP</th><th class="num">Latency</th><th>Error</th><th>At</th></tr></thead>
+        <tbody>${d.attempts.map((a) => `
+          <tr>
+            <td class="num">${a.attempt_no}</td>
+            <td>${badge(a.success ? "succeeded" : "failed").replace("retrying", "failed")}</td>
+            <td class="num mono">${a.status_code ?? "—"}</td>
+            <td class="num mono">${a.duration_ms} ms</td>
+            <td class="muted">${esc(a.error ?? "")}</td>
+            <td class="mono muted">${fmtTime(a.created_at)}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table>` : `<span class="muted">No attempts recorded yet.</span>`;
+  } catch (err) {
+    row.firstElementChild.textContent = err.message;
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const tr = e.target.closest("tr.delivery");
+  if (tr) toggleAttempts(tr.dataset.id);
+});
+$("save").addEventListener("click", () => {
+  token = $("token").value.trim();
+  localStorage.setItem("relay_admin_token", token);
+  refresh();
+});
+$("token").addEventListener("keydown", (e) => { if (e.key === "Enter") $("save").click(); });
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

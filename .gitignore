@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.exe
+/go/bin/
+.env
+.DS_Store
